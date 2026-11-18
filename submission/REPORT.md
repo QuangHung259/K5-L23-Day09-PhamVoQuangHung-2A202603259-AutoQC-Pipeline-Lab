@@ -72,7 +72,39 @@ Kết quả là `kết luận: REWORK — Còn 6 lỗi bắt buộc chưa đư�
 4. **FALSE_POS gần như vô dụng để phân loại.** Precision chỉ **0.31** (11 FP / 16 cảnh báo trên calib). Đây là nhóm cảnh báo còn tồn nhiều nhất ở v3 (21 ảnh) và là lý do chính khiến kết quả là Hold.
 
 ## 5. Train: raw vs clean (tùy chọn, chấm riêng)
-Chưa chạy. Mình ưu tiên hoàn thành phần lõi (pipeline, calibration, báo cáo). Phần train trên Colab (T4, 2 seed × 20 epoch) sẽ làm sau, khi export đã được push.
+**Cấu hình.** Model khởi tạo `yolo26n.pt`, 20 epoch, imgsz 640, batch 16, seed 0 và 1. Train trên Colab T4. Val là `gold_val` (40 ảnh), test là `data/test` (100 ảnh). Nguồn số liệu: `submission/results/comparison.md`.
+
+| biến thể | #ảnh train | số seed | map50 (TB ± độ lệch) | map50_95 (TB ± độ lệch) | precision (TB ± độ lệch) | recall (TB ± độ lệch) |
+|---|---|---|---|---|---|---|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 202 | 2 | 0.701 ± 0.025 | 0.487 ± 0.008 | 0.759 ± 0.003 | 0.625 ± 0.019 |
+
+Chênh mAP50 (clean − raw) = **−0.025**.
+
+Cột "#ảnh train" của `raw` ghi 224, nhưng Ultralytics thực tế bỏ **11 ảnh "corrupt"** (log bước 6: `216 images, 19 backgrounds, 11 corrupt`). Đó là 2 ảnh hỏng (`img_0010`, `img_0136`), 6 ảnh có ID lớp sai (93/7/4/−1) và 3 ảnh có tọa độ NaN hoặc sai số cột. Mỗi ảnh này bị bỏ cả ảnh, kể cả các box đúng trong đó. Vậy `raw` thật ra chỉ train trên **213 ảnh**, và đã được Ultralytics "lọc thô" một phần.
+
+**AP50 theo lớp** (trung bình 2 seed):
+
+| lớp | raw | clean | chênh |
+|---|---:|---:|---:|
+| car | 0.738 | 0.738 | 0.000 |
+| person | 0.822 | 0.823 | +0.001 |
+| truck | 0.648 | 0.538 | **−0.110** |
+| bus | 0.695 | 0.703 | +0.008 |
+
+**Kết luận (trung thực): chưa kết luận được** là clean tốt hơn hay kém hơn raw.
+- Mức chênh −0.025 đúng bằng **1 độ lệch chuẩn giữa các seed** của `clean` (0.025), và chỉ đo trên 2 seed.
+- Độ lệch ≈ 0 của `raw` là do tình cờ 2 seed cho cùng điểm, không có nghĩa là raw ổn định. Seed 1 của clean tự nó đã dao động 0.035 so với seed 0.
+- Car, person và bus gần như không đổi (|Δ| ≤ 0.01). **Gần như toàn bộ mức chênh nằm ở lớp truck**: −0.110 / 4 lớp ≈ −0.028, xấp xỉ đúng bằng −0.025.
+- Ngay trong `clean`, truck dao động 0.590 ↔ 0.486 giữa 2 seed (0.10), lớn hơn cả khoảng cách raw–clean ở các lớp khác.
+
+**Giả thuyết và cách kiểm:**
+1. **Rò rỉ test làm điểm `raw` cao lên.** `raw` vẫn chứa 5 ảnh trùng hệt ảnh test (`LEAK_TEST` trong `01_intake`: test_009/033/039/044/085), tức model raw đã "thấy" 5% tập test. *Cách kiểm:* đánh giá lại cả 2 model trên test sau khi bỏ 5 ảnh này. Hoặc train `raw` với đúng 5 ảnh rò rỉ bị bỏ ra (mọi thứ khác giữ nguyên) để tách riêng ảnh hưởng.
+2. **Lớp truck quá ít mẫu, nên mức chênh là nhiễu.** Truck chỉ có 32 box (raw) và 41 box (clean) trên khoảng 750 box, trong khi tập test chỉ có 100 ảnh. Vài ảnh truck đúng hoặc sai là đủ làm AP đổi 0.1, như chính 2 seed của clean cho thấy. *Cách kiểm:* chạy ≥ 5 seed và đếm số truck trong test. Nếu khoảng tin cậy của truck chồng lên nhau thì kết luận là nhiễu.
+3. **Nhãn truck/bus trong `clean` lệch quy ước so với test.** Sau autofix và review, số box đổi đáng kể: car 122→101, person 537→574, truck 32→41, bus 35→32. Truck tăng nhưng AP truck lại giảm, nên có thể một số box đã được đổi sang truck (hoặc giữ là truck) theo quy ước khác với người gán test. Nhầm truck↔bus cũng là nhóm `POSSIBLE_WRONG_CLASS` mà pipeline không chắc chắn được (mục 4). *Cách kiểm:* so confusion matrix truck/bus của 2 model trên test, và mở xem các ảnh trong `06_review_log` có thay đổi box truck/bus.
+4. **`clean` chưa thật sự sạch.** Lô đang ở trạng thái Hold, còn 38 ảnh có cảnh báo ngữ nghĩa chưa có người duyệt, và 20 dòng bị `drop_line` có thể là vật thật bị mất nhãn. Vì vậy đây chưa phải chặn trên của "dữ liệu sạch". *Cách kiểm:* thêm biến thể `oracle` (nhãn người) vào notebook để có chặn trên.
+
+Vì vậy kết quả train **không** chứng minh pipeline làm dataset tốt hơn, nhưng cũng không chứng minh làm tệ đi. Lợi ích rõ ràng của pipeline nằm ở **tính hợp lệ của phép đo**: bỏ 5 ảnh rò rỉ test và 12 ảnh trùng. Lợi ích này không hiện ra trên mAP, vì chính sự rò rỉ có thể đang thổi phồng điểm của `raw`.
 
 ## 6. Quyết định và ghi chú AI
 **(a) Quyết định cuối: Hold.** Dataset `clean_v1` (202 ảnh) chỉ dùng để thử nghiệm, chưa phát hành.
